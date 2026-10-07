@@ -18,6 +18,7 @@ from homeassistant.components.sensor import (
 from .const import DOMAIN
 from .coordinator import Coordinator
 from .entity import build_entity_id
+from .equalizer import format_frequency
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     entityArray.append(JBLSensor(coordinator,entry,"track","Track","mdi:information"))
     entityArray.append(JBLSensor(coordinator,entry,"channel","Channel","mdi:information"))
     entityArray.append(JBLSensor(coordinator,entry,"audio_format","Audio Format","mdi:surround-sound"))
+    entityArray.append(JBLEqualizerSensor(coordinator, entry))
     
     if "Rears" in coordinator.data:
         entityArray.append(JBLRearSensor(coordinator,entry,0))
@@ -107,6 +109,67 @@ class JBLSensor(Entity):
     async def async_update(self):
         """Update the sensor."""
         await self.coordinator.async_request_refresh()
+
+
+class JBLEqualizerSensor(SensorEntity):
+    """Unified equalizer entity used by the JBL EQ graph/editor card."""
+
+    _attr_icon = "mdi:equalizer"
+
+    def __init__(self, coordinator, entry):
+        self.coordinator = coordinator
+        self._entry = entry
+        self._attr_name = "Equalizer"
+        self._attr_unique_id = f"jbl_equalizer_{entry.entry_id}"
+        self.entity_id = build_entity_id(
+            "sensor",
+            self.coordinator.device_info.get("name", "jbl_integration"),
+            "equalizer",
+        )
+
+    @property
+    def device_info(self):
+        return self.coordinator.device_info
+
+    @property
+    def native_value(self):
+        return self.coordinator.data.get("eq_active_preset") or "Custom"
+
+    @property
+    def extra_state_attributes(self):
+        profile = self.coordinator.data.get("eq_profile") or {}
+        frequencies = [float(value) for value in profile.get("frequencies", [])]
+        gains = [float(value) for value in profile.get("gains", [])]
+        count = min(len(frequencies), len(gains))
+        frequencies = frequencies[:count]
+        gains = gains[:count]
+
+        minimums = profile.get("minimums")
+        maximums = profile.get("maximums")
+        if not minimums or len(minimums) != count:
+            minimums = [-12.0] * count
+        if not maximums or len(maximums) != count:
+            maximums = [12.0] * count
+
+        return {
+            "jbl_eq_editor": True,
+            "entry_id": self._entry.entry_id,
+            "band_count": count,
+            "frequencies": frequencies,
+            "bands": [format_frequency(value) for value in frequencies],
+            "gains": gains,
+            "minimums": minimums,
+            "maximums": maximums,
+            "step": float(profile.get("step") or 0.5),
+            "active_preset": self.coordinator.data.get("eq_active_preset"),
+            "preset_map": self.coordinator.data.get("eq_preset_map", {}),
+        }
+
+    async def async_added_to_hass(self):
+        self.async_on_remove(
+            self.coordinator.async_add_listener(self.async_write_ha_state)
+        )
+
 
 class JBLRearSensor(Entity):
     """Representation of a battery for the rear speakers of the  JBL."""

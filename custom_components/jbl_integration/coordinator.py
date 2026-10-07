@@ -8,12 +8,13 @@ import ssl
 import certifi
 import html
 import socket
+from contextlib import suppress
 from datetime import timedelta
-from functools import partial
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_UUID, CONF_ADDRESS, CONF_SCAN_INTERVAL
 from homeassistant.exceptions import ConfigEntryNotReady
 from .const import DOMAIN
+from .equalizer import build_eq_request
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,12 +46,8 @@ class Coordinator(DataUpdateCoordinator):
 
     async def _create_ssl_context(self):
         """Create SSL context in executor to avoid blocking the event loop."""
-        loop = asyncio.get_event_loop()
-
-        # Run blocking SSL context creation in executor
-        ssl_context = await loop.run_in_executor(
-            None,
-            partial(ssl.create_default_context, cafile=certifi.where())
+        ssl_context = await self.hass.async_add_executor_job(
+            lambda: ssl.create_default_context(cafile=certifi.where())
         )
 
         ssl_context.check_hostname = False
@@ -68,12 +65,10 @@ class Coordinator(DataUpdateCoordinator):
         cert_path = self.hass.config.path("custom_components/jbl_integration/Cert.pem")
         key_path = self.hass.config.path("custom_components/jbl_integration/Key.pem")
 
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
+        await self.hass.async_add_executor_job(
             self.sslcontext.load_cert_chain,
             cert_path,
-            key_path
+            key_path,
         )
         
         device_info = await self.getDeviceInfo()
@@ -378,24 +373,58 @@ class Coordinator(DataUpdateCoordinator):
                                     active_preset = response_json["eq_list"][0]
                                 if active_preset is None:
                                     return {}
-                                gain = active_preset["eq_payload"]["gain"]
-                                eqList = {
-                                        "125Hz":gain[0],    #Min -9, Max 6, step 0.5
-                                        "250Hz":gain[1],    #Min -6, Max 6, step 0.5
-                                        "500Hz":gain[2],    #Min -6, Max 6, step 0.5
-                                        "1000Hz":gain[3],   #Min -6, Max 6, step 0.5
-                                        "2000Hz":gain[4],   #Min -6, Max 6, step 0.5
-                                        "4000Hz":gain[5],   #Min -6, Max 6, step 0.5
-                                        "8000Hz":gain[6],   #Min -6, Max 6, step 0.5
+                                eq_payload = dict(active_preset.get("eq_payload") or {})
+                                frequencies = list(eq_payload.get("fs") or [])
+                                gains = list(eq_payload.get("gain") or [])
+                                if not frequencies or len(frequencies) != len(gains):
+                                    _LOGGER.warning(
+                                        "Invalid EQ profile from %s: %d frequencies, %d gains",
+                                        self.address,
+                                        len(frequencies),
+                                        len(gains),
+                                    )
+                                    return {}
+
+                                # Keep the raw profile so the editor can support any
+                                # number/layout of bands a JBL model exposes.
+                                return {
+                                    "eq_profile": {
+                                        "frequencies": frequencies,
+                                        "gains": gains,
+                                        "band": active_preset.get("band", len(gains)),
+                                        "active_eq_id": active_id,
+                                        "eq_payload": eq_payload,
+                                        "minimums": active_preset.get("minimums"),
+                                        "maximums": active_preset.get("maximums"),
+                                        "step": active_preset.get("step", 0.5),
                                     }
-                                return eqList
-                            else:
-                                gain = response_json["eq_setting"]["eq_payload"]["gain"]
-                                gatheredData = {
-                                    "EQ_1_Low": gain[0],
-                                    "EQ_2_Mid": gain[1],
-                                    "EQ_3_High": gain[2]
                                 }
+                            else:
+                                setting = response_json["eq_setting"]
+                                eq_payload = dict(setting.get("eq_payload") or {})
+                                gains = list(eq_payload.get("gain") or [])
+                                frequencies = list(eq_payload.get("fs") or [])
+                                if not frequencies:
+                                    frequencies = [150.0, 1000.0, 6000.0][:len(gains)]
+                                gatheredData = {
+                                    "eq_profile": {
+                                        "frequencies": frequencies,
+                                        "gains": gains,
+                                        "eq_id": setting.get("eq_id", "1"),
+                                        "eq_name": setting.get("eq_name", "Custom"),
+                                        "eq_status": setting.get("eq_status", "on"),
+                                        "eq_payload": eq_payload,
+                                        "step": setting.get("step", 1),
+                                    }
+                                }
+                                # Preserve the legacy number entities when the
+                                # device still reports the classic three bands.
+                                if len(gains) >= 3:
+                                    gatheredData.update({
+                                        "EQ_1_Low": gains[0],
+                                        "EQ_2_Mid": gains[1],
+                                        "EQ_3_High": gains[2],
+                                    })
                                 return gatheredData
                         else:
                             _LOGGER.error("Failed to get EQ: %s", response.status)
@@ -447,6 +476,37 @@ class Coordinator(DataUpdateCoordinator):
             except Exception as e:
                 _LOGGER.error("Error setting EQ: %s", str(e))
                 return {}
+
+    async def setEQCurve(self, gains):
+        """Set the complete EQ curve in one request."""
+        profile = dict(self.data.get("eq_profile") or {})
+        command, body, normalized = build_eq_request(
+            new_firmware=self.newFirmware,
+            gains=[float(value) for value in gains],
+            profile=profile,
+        )
+
+        url = f"https://{self._entry.data[CONF_ADDRESS]}/httpapi.asp"
+        payload = f"command={command}&payload={json.dumps(body, separators=(',', ':'))}"
+        async with aiohttp.ClientSession() as session:
+            async with asyncio.timeout(10):
+                async with session.post(
+                    url,
+                    headers={"Accept-Encoding": "gzip"},
+                    data=payload,
+                    ssl=self.sslcontext,
+                ) as response:
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"Failed to set EQ curve: HTTP {response.status}"
+                        )
+
+        profile["gains"] = normalized
+        profile["frequencies"] = list(body["eq_payload"]["fs"])
+        profile["eq_payload"] = dict(body["eq_payload"])
+        self.data["eq_profile"] = profile
+        self.data["eq_active_preset"] = "Custom"
+        self.async_set_updated_data(self.data)
 
     async def getNightMode(self):
         response = await self._getCommand("getPersonalListeningMode")
@@ -529,9 +589,16 @@ class Coordinator(DataUpdateCoordinator):
                             return
 
                         self._rendering_control_sid = response.headers.get("SID")
-                        if self._rendering_control_sid and self._rendering_control_renew_task is None:
-                            self._rendering_control_renew_task = self.hass.async_create_task(
-                                self._async_renew_rendering_control_events()
+                        if (
+                            self._rendering_control_sid
+                            and self._rendering_control_renew_task is None
+                        ):
+                            self._rendering_control_renew_task = (
+                                self._entry.async_create_background_task(
+                                    self.hass,
+                                    self._async_renew_rendering_control_events(),
+                                    "JBL RenderingControl renewal",
+                                )
                             )
                         _LOGGER.debug(
                             "Subscribed RenderingControl events for %s: %s via %s",
@@ -545,8 +612,11 @@ class Coordinator(DataUpdateCoordinator):
     async def async_stop_rendering_control_events(self):
         """Unsubscribe from RenderingControl GENA events."""
         if self._rendering_control_renew_task is not None:
-            self._rendering_control_renew_task.cancel()
+            task = self._rendering_control_renew_task
             self._rendering_control_renew_task = None
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
         if not self._rendering_control_sid:
             return

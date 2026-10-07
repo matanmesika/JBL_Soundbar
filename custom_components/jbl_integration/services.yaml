@@ -1,0 +1,33 @@
+set_eq_curve:
+  name: Set equalizer curve
+  description: Apply all JBL equalizer bands in a single device request.
+  fields:
+    entry_id:
+      name: Config entry
+      description: JBL integration config entry ID.
+      required: true
+      example: "01ABCDEF"
+      selector:
+        text:
+    gains:
+      name: Gains
+      description: Ordered gain values matching the Equalizer sensor bands.
+      required: true
+      example: [-1, 0, 1, 0.5, 0, -0.5, 1]
+      selector:
+        object:
+
+set_eq_preset:
+  name: Set equalizer preset
+  description: Select one of the EQ presets reported by the JBL device.
+  fields:
+    entry_id:
+      name: Config entry
+      required: true
+      selector:
+        text:
+    eq_id:
+      name: EQ preset ID
+      required: true
+      selector:
+        text:
