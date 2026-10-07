@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_UUID, CONF_ADDRESS, CONF_SCAN_INTERVAL
 from homeassistant.exceptions import ConfigEntryNotReady
 from .const import DOMAIN
+from .equalizer import build_eq_request
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -444,43 +445,9 @@ class Coordinator(DataUpdateCoordinator):
 
     async def setEQCurve(self, gains):
         """Set the complete EQ curve in one request."""
-        expected = 7 if self.newFirmware else 3
-        if len(gains) != expected:
-            raise ValueError(f"Expected {expected} EQ gains, got {len(gains)}")
-
-        if self.newFirmware:
-            frequencies = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0]
-            mins = [-9.0, -6.0, -6.0, -6.0, -6.0, -6.0, -6.0]
-            maxs = [6.0] * 7
-            normalized = [
-                max(mins[index], min(maxs[index], round(float(value) * 2) / 2))
-                for index, value in enumerate(gains)
-            ]
-            body = {
-                "active_eq_id": "0",
-                "band": 7,
-                "eq_payload": {
-                    "fs": frequencies,
-                    "gain": normalized,
-                },
-            }
-            command = "setActiveEQ"
-            keys = ["125Hz", "250Hz", "500Hz", "1000Hz", "2000Hz", "4000Hz", "8000Hz"]
-        else:
-            normalized = [max(-6.0, min(6.0, round(float(value)))) for value in gains]
-            body = {
-                "eq_id": "1",
-                "eq_name": "Custom",
-                "eq_payload": {
-                    "fs": [150.0, 1000.0, 6000.0],
-                    "gain": normalized,
-                    "q": [0.7070000171661377, 0.5, 0.7070000171661377],
-                    "type": [17.0, 11.0, 16.0],
-                },
-                "eq_status": "on",
-            }
-            command = "setEQ"
-            keys = ["EQ_1_Low", "EQ_2_Mid", "EQ_3_High"]
+        command, body, keys, normalized = build_eq_request(
+            self.newFirmware, [float(value) for value in gains]
+        )
 
         url = f"https://{self._entry.data[CONF_ADDRESS]}/httpapi.asp"
         payload = f"command={command}&payload={json.dumps(body, separators=(',', ':'))}"
