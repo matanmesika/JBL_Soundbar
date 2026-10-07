@@ -373,24 +373,58 @@ class Coordinator(DataUpdateCoordinator):
                                     active_preset = response_json["eq_list"][0]
                                 if active_preset is None:
                                     return {}
-                                gain = active_preset["eq_payload"]["gain"]
-                                eqList = {
-                                        "125Hz":gain[0],    #Min -9, Max 6, step 0.5
-                                        "250Hz":gain[1],    #Min -6, Max 6, step 0.5
-                                        "500Hz":gain[2],    #Min -6, Max 6, step 0.5
-                                        "1000Hz":gain[3],   #Min -6, Max 6, step 0.5
-                                        "2000Hz":gain[4],   #Min -6, Max 6, step 0.5
-                                        "4000Hz":gain[5],   #Min -6, Max 6, step 0.5
-                                        "8000Hz":gain[6],   #Min -6, Max 6, step 0.5
+                                eq_payload = dict(active_preset.get("eq_payload") or {})
+                                frequencies = list(eq_payload.get("fs") or [])
+                                gains = list(eq_payload.get("gain") or [])
+                                if not frequencies or len(frequencies) != len(gains):
+                                    _LOGGER.warning(
+                                        "Invalid EQ profile from %s: %d frequencies, %d gains",
+                                        self.address,
+                                        len(frequencies),
+                                        len(gains),
+                                    )
+                                    return {}
+
+                                # Keep the raw profile so the editor can support any
+                                # number/layout of bands a JBL model exposes.
+                                return {
+                                    "eq_profile": {
+                                        "frequencies": frequencies,
+                                        "gains": gains,
+                                        "band": active_preset.get("band", len(gains)),
+                                        "active_eq_id": active_id,
+                                        "eq_payload": eq_payload,
+                                        "minimums": active_preset.get("minimums"),
+                                        "maximums": active_preset.get("maximums"),
+                                        "step": active_preset.get("step", 0.5),
                                     }
-                                return eqList
-                            else:
-                                gain = response_json["eq_setting"]["eq_payload"]["gain"]
-                                gatheredData = {
-                                    "EQ_1_Low": gain[0],
-                                    "EQ_2_Mid": gain[1],
-                                    "EQ_3_High": gain[2]
                                 }
+                            else:
+                                setting = response_json["eq_setting"]
+                                eq_payload = dict(setting.get("eq_payload") or {})
+                                gains = list(eq_payload.get("gain") or [])
+                                frequencies = list(eq_payload.get("fs") or [])
+                                if not frequencies:
+                                    frequencies = [150.0, 1000.0, 6000.0][:len(gains)]
+                                gatheredData = {
+                                    "eq_profile": {
+                                        "frequencies": frequencies,
+                                        "gains": gains,
+                                        "eq_id": setting.get("eq_id", "1"),
+                                        "eq_name": setting.get("eq_name", "Custom"),
+                                        "eq_status": setting.get("eq_status", "on"),
+                                        "eq_payload": eq_payload,
+                                        "step": setting.get("step", 1),
+                                    }
+                                }
+                                # Preserve the legacy number entities when the
+                                # device still reports the classic three bands.
+                                if len(gains) >= 3:
+                                    gatheredData.update({
+                                        "EQ_1_Low": gains[0],
+                                        "EQ_2_Mid": gains[1],
+                                        "EQ_3_High": gains[2],
+                                    })
                                 return gatheredData
                         else:
                             _LOGGER.error("Failed to get EQ: %s", response.status)
@@ -445,8 +479,11 @@ class Coordinator(DataUpdateCoordinator):
 
     async def setEQCurve(self, gains):
         """Set the complete EQ curve in one request."""
-        command, body, keys, normalized = build_eq_request(
-            self.newFirmware, [float(value) for value in gains]
+        profile = dict(self.data.get("eq_profile") or {})
+        command, body, normalized = build_eq_request(
+            new_firmware=self.newFirmware,
+            gains=[float(value) for value in gains],
+            profile=profile,
         )
 
         url = f"https://{self._entry.data[CONF_ADDRESS]}/httpapi.asp"
@@ -464,8 +501,10 @@ class Coordinator(DataUpdateCoordinator):
                             f"Failed to set EQ curve: HTTP {response.status}"
                         )
 
-        for key, value in zip(keys, normalized, strict=True):
-            self.data[key] = value
+        profile["gains"] = normalized
+        profile["frequencies"] = list(body["eq_payload"]["fs"])
+        profile["eq_payload"] = dict(body["eq_payload"])
+        self.data["eq_profile"] = profile
         self.data["eq_active_preset"] = "Custom"
         self.async_set_updated_data(self.data)
 
