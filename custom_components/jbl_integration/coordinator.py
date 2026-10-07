@@ -8,8 +8,8 @@ import ssl
 import certifi
 import html
 import socket
+from contextlib import suppress
 from datetime import timedelta
-from functools import partial
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_UUID, CONF_ADDRESS, CONF_SCAN_INTERVAL
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -45,12 +45,10 @@ class Coordinator(DataUpdateCoordinator):
 
     async def _create_ssl_context(self):
         """Create SSL context in executor to avoid blocking the event loop."""
-        loop = asyncio.get_event_loop()
-
-        # Run blocking SSL context creation in executor
-        ssl_context = await loop.run_in_executor(
-            None,
-            partial(ssl.create_default_context, cafile=certifi.where())
+        ssl_context = await self.hass.async_add_executor_job(
+            ssl.create_default_context,
+            ssl.Purpose.SERVER_AUTH,
+            cafile=certifi.where(),
         )
 
         ssl_context.check_hostname = False
@@ -68,12 +66,10 @@ class Coordinator(DataUpdateCoordinator):
         cert_path = self.hass.config.path("custom_components/jbl_integration/Cert.pem")
         key_path = self.hass.config.path("custom_components/jbl_integration/Key.pem")
 
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
+        await self.hass.async_add_executor_job(
             self.sslcontext.load_cert_chain,
             cert_path,
-            key_path
+            key_path,
         )
         
         device_info = await self.getDeviceInfo()
@@ -448,6 +444,66 @@ class Coordinator(DataUpdateCoordinator):
                 _LOGGER.error("Error setting EQ: %s", str(e))
                 return {}
 
+    async def setEQCurve(self, gains):
+        """Set the complete EQ curve in one request."""
+        expected = 7 if self.newFirmware else 3
+        if len(gains) != expected:
+            raise ValueError(f"Expected {expected} EQ gains, got {len(gains)}")
+
+        if self.newFirmware:
+            frequencies = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0]
+            mins = [-9.0, -6.0, -6.0, -6.0, -6.0, -6.0, -6.0]
+            maxs = [6.0] * 7
+            normalized = [
+                max(mins[index], min(maxs[index], round(float(value) * 2) / 2))
+                for index, value in enumerate(gains)
+            ]
+            body = {
+                "active_eq_id": "0",
+                "band": 7,
+                "eq_payload": {
+                    "fs": frequencies,
+                    "gain": normalized,
+                },
+            }
+            command = "setActiveEQ"
+            keys = ["125Hz", "250Hz", "500Hz", "1000Hz", "2000Hz", "4000Hz", "8000Hz"]
+        else:
+            normalized = [max(-6.0, min(6.0, round(float(value)))) for value in gains]
+            body = {
+                "eq_id": "1",
+                "eq_name": "Custom",
+                "eq_payload": {
+                    "fs": [150.0, 1000.0, 6000.0],
+                    "gain": normalized,
+                    "q": [0.7070000171661377, 0.5, 0.7070000171661377],
+                    "type": [17.0, 11.0, 16.0],
+                },
+                "eq_status": "on",
+            }
+            command = "setEQ"
+            keys = ["EQ_1_Low", "EQ_2_Mid", "EQ_3_High"]
+
+        url = f"https://{self._entry.data[CONF_ADDRESS]}/httpapi.asp"
+        payload = f"command={command}&payload={json.dumps(body, separators=(',', ':'))}"
+        async with aiohttp.ClientSession() as session:
+            async with asyncio.timeout(10):
+                async with session.post(
+                    url,
+                    headers={"Accept-Encoding": "gzip"},
+                    data=payload,
+                    ssl=self.sslcontext,
+                ) as response:
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"Failed to set EQ curve: HTTP {response.status}"
+                        )
+
+        for key, value in zip(keys, normalized, strict=True):
+            self.data[key] = value
+        self.data["eq_active_preset"] = "Custom"
+        self.async_set_updated_data(self.data)
+
     async def getNightMode(self):
         response = await self._getCommand("getPersonalListeningMode")
         if "status" in response:
@@ -529,9 +585,16 @@ class Coordinator(DataUpdateCoordinator):
                             return
 
                         self._rendering_control_sid = response.headers.get("SID")
-                        if self._rendering_control_sid and self._rendering_control_renew_task is None:
-                            self._rendering_control_renew_task = self.hass.async_create_task(
-                                self._async_renew_rendering_control_events()
+                        if (
+                            self._rendering_control_sid
+                            and self._rendering_control_renew_task is None
+                        ):
+                            self._rendering_control_renew_task = (
+                                self._entry.async_create_background_task(
+                                    self.hass,
+                                    self._async_renew_rendering_control_events(),
+                                    "JBL RenderingControl renewal",
+                                )
                             )
                         _LOGGER.debug(
                             "Subscribed RenderingControl events for %s: %s via %s",
@@ -545,8 +608,11 @@ class Coordinator(DataUpdateCoordinator):
     async def async_stop_rendering_control_events(self):
         """Unsubscribe from RenderingControl GENA events."""
         if self._rendering_control_renew_task is not None:
-            self._rendering_control_renew_task.cancel()
+            task = self._rendering_control_renew_task
             self._rendering_control_renew_task = None
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
         if not self._rendering_control_sid:
             return
