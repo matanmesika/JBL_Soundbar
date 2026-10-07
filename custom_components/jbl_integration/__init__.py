@@ -1,9 +1,13 @@
 """Initialize the JBL integration."""
 import asyncio
 import logging
+from pathlib import Path
+
+import voluptuous as vol
 
 from aiohttp import web
-from homeassistant.components.http import KEY_HASS
+from homeassistant.components.frontend import add_extra_js_url
+from homeassistant.components.http import KEY_HASS, StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
@@ -15,6 +19,10 @@ from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_UUID, CONF
 # Define the configuration schema for your integration
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 _LOGGER = logging.getLogger(__name__)
+
+SERVICE_SET_EQ_CURVE = "set_eq_curve"
+SERVICE_SET_EQ_PRESET = "set_eq_preset"
+EQ_CARD_URL = f"/{DOMAIN}/jbl-eq-card.js"
 
 async def _handle_rendering_control_notify(request):
     """Handle RenderingControl GENA NOTIFY callbacks from JBL devices."""
@@ -42,8 +50,69 @@ def _register_rendering_control_event_route(hass):
     hass.data[DOMAIN]["rendering_control_event_route_registered"] = True
 
 async def async_setup(hass: HomeAssistant, config: dict):
-    """Set up the JBL integration."""
+    """Set up the JBL integration and its unified EQ editor."""
     _register_rendering_control_event_route(hass)
+
+    frontend_dir = Path(__file__).parent / "frontend"
+    try:
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(f"/{DOMAIN}", str(frontend_dir), False)]
+        )
+    except RuntimeError:
+        _LOGGER.debug("JBL frontend static path already registered")
+    add_extra_js_url(hass, EQ_CARD_URL)
+
+    async def _set_eq_curve(call):
+        entry_id = call.data["entry_id"]
+        gains = call.data["gains"]
+        coordinator = (
+            hass.data.get(DOMAIN, {})
+            .get(entry_id, {})
+            .get("coordinator")
+        )
+        if coordinator is None:
+            raise ValueError(f"Unknown JBL config entry: {entry_id}")
+        await coordinator.setEQCurve(gains)
+        await coordinator.async_request_refresh()
+
+    async def _set_eq_preset(call):
+        entry_id = call.data["entry_id"]
+        eq_id = str(call.data["eq_id"])
+        coordinator = (
+            hass.data.get(DOMAIN, {})
+            .get(entry_id, {})
+            .get("coordinator")
+        )
+        if coordinator is None:
+            raise ValueError(f"Unknown JBL config entry: {entry_id}")
+        await coordinator.setActiveEQPreset(eq_id)
+        await coordinator.async_request_refresh()
+
+    if not hass.services.has_service(DOMAIN, SERVICE_SET_EQ_CURVE):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_SET_EQ_CURVE,
+            _set_eq_curve,
+            schema=vol.Schema(
+                {
+                    vol.Required("entry_id"): str,
+                    vol.Required("gains"): [vol.Coerce(float)],
+                }
+            ),
+        )
+    if not hass.services.has_service(DOMAIN, SERVICE_SET_EQ_PRESET):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_SET_EQ_PRESET,
+            _set_eq_preset,
+            schema=vol.Schema(
+                {
+                    vol.Required("entry_id"): str,
+                    vol.Required("eq_id"): str,
+                }
+            ),
+        )
+
     return True
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -57,7 +126,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     _register_rendering_control_event_route(hass)
     hass.data[DOMAIN][entry.entry_id] = {"coordinator": coordinator}
-    await coordinator.async_start_rendering_control_events()
+    entry.async_create_background_task(
+        hass,
+        coordinator.async_start_rendering_control_events(),
+        "JBL RenderingControl subscription",
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "switch","number","button","binary_sensor","select"])
 
