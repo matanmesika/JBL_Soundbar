@@ -36,6 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     entityArray.append(JBLSensor(coordinator,entry,"track","Track","mdi:information"))
     entityArray.append(JBLSensor(coordinator,entry,"channel","Channel","mdi:information"))
     entityArray.append(JBLSensor(coordinator,entry,"audio_format","Audio Format","mdi:surround-sound"))
+    entityArray.append(JBLEqualizerSensor(coordinator, entry))
     
     if "Rears" in coordinator.data:
         entityArray.append(JBLRearSensor(coordinator,entry,0))
@@ -107,6 +108,64 @@ class JBLSensor(Entity):
     async def async_update(self):
         """Update the sensor."""
         await self.coordinator.async_request_refresh()
+
+
+class JBLEqualizerSensor(SensorEntity):
+    """Unified equalizer entity used by the JBL EQ graph/editor card."""
+
+    _attr_icon = "mdi:equalizer"
+
+    def __init__(self, coordinator, entry):
+        self.coordinator = coordinator
+        self._entry = entry
+        self._attr_name = "Equalizer"
+        self._attr_unique_id = f"jbl_equalizer_{entry.entry_id}"
+        self.entity_id = build_entity_id(
+            "sensor",
+            self.coordinator.device_info.get("name", "jbl_integration"),
+            "equalizer",
+        )
+
+    @property
+    def device_info(self):
+        return self.coordinator.device_info
+
+    @property
+    def native_value(self):
+        return self.coordinator.data.get("eq_active_preset") or "Custom"
+
+    @property
+    def extra_state_attributes(self):
+        if self.coordinator.newFirmware:
+            bands = ["125 Hz", "250 Hz", "500 Hz", "1 kHz", "2 kHz", "4 kHz", "8 kHz"]
+            keys = ["125Hz", "250Hz", "500Hz", "1000Hz", "2000Hz", "4000Hz", "8000Hz"]
+            minimums = [-9, -6, -6, -6, -6, -6, -6]
+            maximums = [6] * 7
+            step = 0.5
+        else:
+            bands = ["Bass", "Mid", "Treble"]
+            keys = ["EQ_1_Low", "EQ_2_Mid", "EQ_3_High"]
+            minimums = [-6, -6, -6]
+            maximums = [6, 6, 6]
+            step = 1
+
+        return {
+            "jbl_eq_editor": True,
+            "entry_id": self._entry.entry_id,
+            "bands": bands,
+            "gains": [self.coordinator.data.get(key, 0) for key in keys],
+            "minimums": minimums,
+            "maximums": maximums,
+            "step": step,
+            "active_preset": self.coordinator.data.get("eq_active_preset"),
+            "preset_map": self.coordinator.data.get("eq_preset_map", {}),
+        }
+
+    async def async_added_to_hass(self):
+        self.async_on_remove(
+            self.coordinator.async_add_listener(self.async_write_ha_state)
+        )
+
 
 class JBLRearSensor(Entity):
     """Representation of a battery for the rear speakers of the  JBL."""
