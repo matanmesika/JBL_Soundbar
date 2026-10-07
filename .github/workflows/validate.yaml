@@ -7,13 +7,25 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   validate-hacs:
     runs-on: "ubuntu-latest"
     steps:
-      - uses: "actions/checkout@v4"
-      - uses: "home-assistant/actions/hassfest@master"
+      - uses: "actions/checkout@v5"
+
+      - name: Home Assistant hassfest
+        uses: "home-assistant/actions/hassfest@master"
+
+      # HACS validates repository metadata (issues/topics), not only the code.
+      # Forks do not necessarily inherit that metadata, so running this check
+      # there creates false failures. It still runs normally in the upstream
+      # repository and therefore on the real upstream PR.
       - name: HACS validation
+        if: github.repository == 'MrBearPresident/JBL_Soundbar'
         uses: "hacs/action@main"
         with:
           category: "integration"
+          comment: false
