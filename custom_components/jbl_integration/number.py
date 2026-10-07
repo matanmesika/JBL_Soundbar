@@ -145,6 +145,11 @@ class JBLEqNumber(NumberEntity):
 
 
     @property
+    def entity_registry_enabled_default(self) -> bool:
+        """Hide individual EQ bands by default; use the unified EQ card instead."""
+        return False
+
+    @property
     def native_min_value(self):
         """Return the minimum value."""
         minValue = -6 if ("EQ_1_Low" != self.entityName and " 125Hz" != self.entityName) else -9
