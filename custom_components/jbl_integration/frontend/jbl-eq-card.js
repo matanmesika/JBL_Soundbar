@@ -44,8 +44,8 @@ class JBLEqualizerCard extends HTMLElement {
   }
 
   _renderMissing() {
-    this.shadowRoot.innerHTML = `
-      <ha-card>
+    const markup = `
+      <ha-card class="${modal ? "modal-card" : ""}">
         <div class="missing">
           JBL Equalizer entity not found. Set <code>entity:</code> in the card config.
         </div>
@@ -56,6 +56,100 @@ class JBLEqualizerCard extends HTMLElement {
   }
 
   _render(state) {
+    if (this._config.mode === "button") {
+      this._renderButton(state);
+      return;
+    }
+
+    this._renderEditor(state, false);
+  }
+
+  _renderButton(state) {
+    const title = this._escape(this._config.name || "Equalizer");
+    const preset = this._escape(
+      state.attributes.active_preset || state.state || "Custom"
+    );
+
+    this.shadowRoot.innerHTML = `
+      <ha-card class="button-card" tabindex="0" role="button" aria-label="Open JBL Equalizer">
+        <div class="button-content">
+          <ha-icon icon="mdi:equalizer"></ha-icon>
+          <div class="button-text">
+            <div class="button-title">${title}</div>
+            <div class="button-subtitle">${preset}</div>
+          </div>
+          <ha-icon icon="mdi:chevron-right"></ha-icon>
+        </div>
+      </ha-card>
+      <div id="modal-root"></div>
+      <style>
+        .button-card { cursor:pointer; padding:14px 16px; }
+        .button-content { display:flex; align-items:center; gap:12px; }
+        .button-content > ha-icon:first-child { color:var(--primary-color); }
+        .button-text { flex:1; min-width:0; }
+        .button-title { font-size:16px; font-weight:600; color:var(--primary-text-color); }
+        .button-subtitle { font-size:12px; color:var(--secondary-text-color); margin-top:2px; }
+      </style>`;
+
+    const open = () => this._openModal(state);
+    const card = this.shadowRoot.querySelector(".button-card");
+    card?.addEventListener("click", open);
+    card?.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        open();
+      }
+    });
+  }
+
+  _openModal(state) {
+    const root = this.shadowRoot.getElementById("modal-root");
+    if (!root) return;
+
+    root.innerHTML = `
+      <div class="modal-backdrop">
+        <div class="modal-shell" role="dialog" aria-modal="true">
+          <button id="modal-close" class="modal-close" aria-label="Close">
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
+          <div id="modal-editor"></div>
+        </div>
+      </div>
+      <style>
+        .modal-backdrop {
+          position:fixed; inset:0; z-index:9999;
+          display:flex; align-items:center; justify-content:center;
+          padding:18px; background:rgba(0,0,0,.48);
+          backdrop-filter:blur(6px);
+        }
+        .modal-shell {
+          position:relative; width:min(720px, 96vw); max-height:90vh;
+          overflow:auto; border-radius:22px;
+          background:var(--card-background-color);
+          box-shadow:0 18px 60px rgba(0,0,0,.35);
+        }
+        .modal-close {
+          position:absolute; z-index:2; top:10px; right:10px;
+          width:38px; height:38px; display:grid; place-items:center;
+          border:0; border-radius:50%; cursor:pointer;
+          background:var(--secondary-background-color);
+          color:var(--primary-text-color);
+        }
+      </style>`;
+
+    const modalEditor = root.querySelector("#modal-editor");
+    if (modalEditor) {
+      this._renderEditor(state, true, modalEditor);
+    }
+
+    const close = () => { root.innerHTML = ""; };
+    root.querySelector("#modal-close")?.addEventListener("click", close);
+    root.querySelector(".modal-backdrop")?.addEventListener("click", (ev) => {
+      if (ev.target.classList.contains("modal-backdrop")) close();
+    });
+  }
+
+  _renderEditor(state, modal = false, target = this.shadowRoot) {
     const a = state.attributes;
     const bands = a.bands || [];
     const minimums = a.minimums || bands.map(() => -6);
@@ -169,13 +263,15 @@ class JBLEqualizerCard extends HTMLElement {
         button.primary { background:var(--primary-color); color:var(--text-primary-color, white); }
         button.secondary { background:var(--secondary-background-color); color:var(--primary-text-color); }
         button:disabled { opacity:.45; cursor:default; }
+        ${modal ? ".modal-card { box-shadow:none; border-radius:22px; padding-top:54px; }" : ""}
       </style>`;
 
-    this._bind(state, { top, plotH, globalMin, globalMax, minimums, maximums, step });
+    target.innerHTML = markup;
+    this._bind(state, { top, plotH, globalMin, globalMax, minimums, maximums, step }, target);
   }
 
-  _bind(state, graph) {
-    const chart = this.shadowRoot.getElementById("chart");
+  _bind(state, graph, root = this.shadowRoot) {
+    const chart = root.getElementById("chart");
     chart?.querySelectorAll(".handle").forEach((handle) => {
       handle.addEventListener("pointerdown", (ev) => {
         this._dragIndex = Number(handle.dataset.index);
@@ -206,13 +302,13 @@ class JBLEqualizerCard extends HTMLElement {
       if (ev.buttons === 0) stop();
     });
 
-    this.shadowRoot.getElementById("flat")?.addEventListener("click", () => {
+    root.getElementById("flat")?.addEventListener("click", () => {
       this._draft = this._draft.map(() => 0);
       this._dirty = true;
       this._render(state);
     });
 
-    this.shadowRoot.getElementById("apply")?.addEventListener("click", async () => {
+    root.getElementById("apply")?.addEventListener("click", async () => {
       if (!this._dirty) return;
       await this._hass.callService("jbl_integration", "set_eq_curve", {
         entry_id: state.attributes.entry_id,
@@ -221,7 +317,7 @@ class JBLEqualizerCard extends HTMLElement {
       this._dirty = false;
     });
 
-    this.shadowRoot.getElementById("preset")?.addEventListener("change", async (ev) => {
+    root.getElementById("preset")?.addEventListener("change", async (ev) => {
       await this._hass.callService("jbl_integration", "set_eq_preset", {
         entry_id: state.attributes.entry_id,
         eq_id: ev.target.value,
@@ -252,7 +348,7 @@ if (!window.customCards.some((card) => card.type === "jbl-equalizer-card")) {
   window.customCards.push({
     type: "jbl-equalizer-card",
     name: "JBL Equalizer Card",
-    description: "Interactive graphic equalizer for JBL Integration",
+    description: "Interactive JBL equalizer. Use mode: button for a compact launcher.",
     preview: true,
   });
 }
