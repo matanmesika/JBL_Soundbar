@@ -46,9 +46,7 @@ class Coordinator(DataUpdateCoordinator):
     async def _create_ssl_context(self):
         """Create SSL context in executor to avoid blocking the event loop."""
         ssl_context = await self.hass.async_add_executor_job(
-            ssl.create_default_context,
-            ssl.Purpose.SERVER_AUTH,
-            cafile=certifi.where(),
+            lambda: ssl.create_default_context(cafile=certifi.where())
         )
 
         ssl_context.check_hostname = False
